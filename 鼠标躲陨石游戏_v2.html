@@ -1,0 +1,374 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>陨石鼠标</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #071122; }
+    canvas { display: block; width: 100%; height: 100%; cursor: none; }
+  </style>
+</head>
+<body>
+  <canvas id="gameCanvas" aria-label="陨石鼠标游戏"></canvas>
+  <script>
+    const canvas = document.querySelector('#gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const METEOR_TYPES = [
+      { name: '小型', radius: 14, damage: 10, speed: 180, color: '#e89652' },
+      { name: '中型', radius: 24, damage: 20, speed: 125, color: '#dc7047' },
+      { name: '大型', radius: 36, damage: 30, speed: 85, color: '#bf4d42' }
+    ];
+
+    let player;
+    let meteors;
+    let experience;
+    let collectedInWave;
+    let meteorTarget;
+    let pointerTarget;
+    let isAiming = false;
+    let lastFrame = 0;
+
+    function resizeCanvas() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    }
+
+    function randomPoint(margin) {
+      return {
+        x: margin + Math.random() * Math.max(1, canvas.width - margin * 2),
+        y: margin + Math.random() * Math.max(1, canvas.height - margin * 2)
+      };
+    }
+
+    function getDifficultyLevel() {
+      return Math.floor(player.score / 1000);
+    }
+
+    function getMeteorTarget() {
+      return Math.min(80, 3 + getDifficultyLevel() * 5);
+    }
+
+    function spawnMeteor() {
+      const type = METEOR_TYPES[Math.floor(Math.random() * METEOR_TYPES.length)];
+      const edge = Math.floor(Math.random() * 4);
+      let x;
+      let y;
+      if (edge === 0) { x = Math.random() * canvas.width; y = -type.radius; }
+      if (edge === 1) { x = canvas.width + type.radius; y = Math.random() * canvas.height; }
+      if (edge === 2) { x = Math.random() * canvas.width; y = canvas.height + type.radius; }
+      if (edge === 3) { x = -type.radius; y = Math.random() * canvas.height; }
+      const target = randomPoint(80);
+      const distance = Math.hypot(target.x - x, target.y - y) || 1;
+      const speed = type.speed * (1 + getDifficultyLevel() * 0.2);
+      return {
+        ...type,
+        x,
+        y,
+        vx: (target.x - x) / distance * speed,
+        vy: (target.y - y) / distance * speed,
+        spin: Math.random() * Math.PI * 2,
+        spinSpeed: (Math.random() - 0.5) * 4
+      };
+    }
+
+    function spawnExperienceWave() {
+      experience = Array.from({ length: 5 }, () => {
+        let point = randomPoint(55);
+        while (Math.hypot(point.x - player.x, point.y - player.y) < 100) point = randomPoint(55);
+        return { ...point, radius: 11, pulse: Math.random() * Math.PI * 2 };
+      });
+    }
+
+    function resetGame() {
+      player = {
+        x: canvas.width / 2,
+        y: canvas.height / 2,
+        radius: 18,
+        health: 100,
+        energy: 100,
+        score: 0,
+        trail: [],
+        invulnerableUntil: 0,
+        gameOver: false
+      };
+      isAiming = false;
+      pointerTarget = { x: player.x, y: player.y };
+      collectedInWave = 0;
+      meteorTarget = getMeteorTarget();
+      meteors = Array.from({ length: meteorTarget }, spawnMeteor);
+      spawnExperienceWave();
+    }
+
+    function circlesOverlap(a, b) {
+      return Math.hypot(a.x - b.x, a.y - b.y) < a.radius + b.radius;
+    }
+
+    function updatePlayer(deltaSeconds) {
+      if (!isAiming && pointerTarget && (player.x !== pointerTarget.x || player.y !== pointerTarget.y)) {
+        player.x = pointerTarget.x;
+        player.y = pointerTarget.y;
+        player.trail.push({ x: player.x, y: player.y, life: 1 });
+        player.trail = player.trail.slice(-18);
+      }
+      player.energy = Math.min(100, player.energy + deltaSeconds * 5);
+      player.trail.forEach(point => { point.life -= deltaSeconds * 2.2; });
+      player.trail = player.trail.filter(point => point.life > 0);
+    }
+
+    function updateMeteors(deltaSeconds, now) {
+      meteorTarget = getMeteorTarget();
+      meteors = meteors.filter(meteor => {
+        meteor.x += meteor.vx * deltaSeconds;
+        meteor.y += meteor.vy * deltaSeconds;
+        meteor.spin += meteor.spinSpeed * deltaSeconds;
+        if (now >= player.invulnerableUntil && circlesOverlap(player, meteor)) {
+          player.health -= meteor.damage;
+          player.invulnerableUntil = now + 500;
+          return false;
+        }
+        return meteor.x > -meteor.radius * 2 && meteor.x < canvas.width + meteor.radius * 2 &&
+          meteor.y > -meteor.radius * 2 && meteor.y < canvas.height + meteor.radius * 2;
+      });
+      while (meteors.length < meteorTarget) meteors.push(spawnMeteor());
+    }
+
+    function updateExperience() {
+      experience = experience.filter(point => {
+        if (!circlesOverlap(player, point)) return true;
+        player.health = Math.min(100, player.health + 5);
+        player.score += 100;
+        collectedInWave += 1;
+        return false;
+      });
+      if (collectedInWave === 5) {
+        collectedInWave = 0;
+        spawnExperienceWave();
+      }
+    }
+
+    function drawBackground(now) {
+      const gradient = ctx.createRadialGradient(canvas.width * 0.5, canvas.height * 0.45, 0, canvas.width * 0.5, canvas.height * 0.45, Math.max(canvas.width, canvas.height));
+      gradient.addColorStop(0, '#122b51');
+      gradient.addColorStop(1, '#050a15');
+      ctx.fillStyle = gradient;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = 'rgba(185, 225, 255, 0.55)';
+      for (let i = 0; i < 80; i += 1) {
+        const x = (i * 149) % canvas.width;
+        const y = (i * 83) % canvas.height;
+        const size = i % 7 === 0 ? 2 : 1;
+        ctx.globalAlpha = 0.25 + ((Math.sin(now / 700 + i) + 1) * 0.2);
+        ctx.fillRect(x, y, size, size);
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    function drawExperience(now) {
+      experience.forEach(point => {
+        const glow = 16 + Math.sin(now / 180 + point.pulse) * 4;
+        const gradient = ctx.createRadialGradient(point.x, point.y, 1, point.x, point.y, glow);
+        gradient.addColorStop(0, 'rgba(172, 255, 146, 1)');
+        gradient.addColorStop(0.35, 'rgba(80, 236, 140, 0.8)');
+        gradient.addColorStop(1, 'rgba(80, 236, 140, 0)');
+        ctx.fillStyle = gradient;
+        ctx.beginPath();
+        ctx.arc(point.x, point.y, glow, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#d7ffc6';
+        ctx.beginPath();
+        ctx.arc(point.x, point.y, point.radius * 0.55, 0, Math.PI * 2);
+        ctx.fill();
+      });
+    }
+
+    function drawMeteor(meteor) {
+      ctx.save();
+      ctx.translate(meteor.x, meteor.y);
+      ctx.rotate(meteor.spin);
+      ctx.fillStyle = meteor.color;
+      ctx.beginPath();
+      for (let i = 0; i < 9; i += 1) {
+        const angle = i / 9 * Math.PI * 2;
+        const radius = meteor.radius * (0.78 + (i % 2) * 0.2);
+        const x = Math.cos(angle) * radius;
+        const y = Math.sin(angle) * radius;
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = 'rgba(65, 25, 30, 0.5)';
+      ctx.beginPath();
+      ctx.arc(-meteor.radius * 0.22, -meteor.radius * 0.12, meteor.radius * 0.18, 0, Math.PI * 2);
+      ctx.arc(meteor.radius * 0.22, meteor.radius * 0.18, meteor.radius * 0.12, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    function drawTrail() {
+      player.trail.forEach(point => {
+        ctx.fillStyle = `rgba(59, 255, 142, ${point.life * 0.45})`;
+        ctx.beginPath();
+        ctx.arc(point.x, point.y, 3 + point.life * 7, 0, Math.PI * 2);
+        ctx.fill();
+      });
+    }
+
+    function drawMouse(now) {
+      const blinking = now < player.invulnerableUntil && Math.floor(now / 70) % 2 === 0;
+      if (blinking) return;
+      ctx.save();
+      ctx.translate(player.x, player.y);
+      ctx.fillStyle = '#dce8f2';
+      ctx.strokeStyle = '#aebfce';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.ellipse(0, 2, 19, 14, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = '#f1a7bf';
+      ctx.beginPath();
+      ctx.arc(-10, -10, 6, 0, Math.PI * 2);
+      ctx.arc(2, -11, 6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#2a3642';
+      ctx.beginPath();
+      ctx.arc(13, -1, 2.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#c7d7e4';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(-17, 5);
+      ctx.quadraticCurveTo(-31, 12, -26, 22);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function drawAimReticle() {
+      if (!isAiming || !pointerTarget) return;
+      ctx.save();
+      ctx.translate(pointerTarget.x, pointerTarget.y);
+      ctx.strokeStyle = '#67ffab';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(0, 0, 16, 0, Math.PI * 2);
+      ctx.moveTo(-24, 0); ctx.lineTo(24, 0);
+      ctx.moveTo(0, -24); ctx.lineTo(0, 24);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function drawBar(x, y, width, label, value, color) {
+      ctx.fillStyle = 'rgba(6, 14, 30, 0.76)';
+      ctx.fillRect(x, y, width, 26);
+      ctx.fillStyle = color;
+      ctx.fillRect(x + 3, y + 3, (width - 6) * value / 100, 20);
+      ctx.fillStyle = '#edf7ff';
+      ctx.font = 'bold 13px system-ui, sans-serif';
+      ctx.fillText(`${label} ${Math.ceil(value)}/100`, x + 9, y + 18);
+    }
+
+    function drawHud() {
+      drawBar(22, 22, 220, '生命', player.health, '#ed5e6f');
+      drawBar(22, 56, 220, '能量', player.energy, '#50c5f7');
+      ctx.fillStyle = '#edf7ff';
+      ctx.font = 'bold 18px system-ui, sans-serif';
+      ctx.fillText(`分数 ${player.score}`, 22, 105);
+      ctx.font = '14px system-ui, sans-serif';
+      ctx.fillStyle = '#a9c4df';
+      ctx.fillText(`经验波次 ${collectedInWave}/5  ·  难度 ${getDifficultyLevel()}  ·  陨石 ${meteorTarget}`, 22, 130);
+      ctx.textAlign = 'right';
+      ctx.fillText('移动鼠标躲避  ·  按住左键瞄准，松开瞬移（消耗 50 能量）', canvas.width - 22, 34);
+      ctx.textAlign = 'left';
+    }
+
+    function drawGameOver() {
+      ctx.fillStyle = 'rgba(2, 6, 16, 0.7)';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 46px system-ui, sans-serif';
+      ctx.fillText('游戏结束', canvas.width / 2, canvas.height / 2 - 30);
+      ctx.font = '24px system-ui, sans-serif';
+      ctx.fillStyle = '#b7d7ef';
+      ctx.fillText(`最终分数：${player.score}`, canvas.width / 2, canvas.height / 2 + 18);
+      ctx.font = '16px system-ui, sans-serif';
+      ctx.fillStyle = '#80f2b2';
+      ctx.fillText('点击任意位置重新开始', canvas.width / 2, canvas.height / 2 + 58);
+      ctx.textAlign = 'left';
+    }
+
+    function drawScene(now) {
+      drawBackground(now);
+      drawExperience(now);
+      meteors.forEach(drawMeteor);
+      drawTrail();
+      drawMouse(now);
+      drawAimReticle();
+      drawHud();
+      if (player.gameOver) drawGameOver();
+    }
+
+    function gameLoop(timestamp) {
+      const deltaSeconds = Math.min((timestamp - (lastFrame || timestamp)) / 1000, 0.05);
+      lastFrame = timestamp;
+      if (!player.gameOver) {
+        updatePlayer(deltaSeconds);
+        updateExperience();
+        updateMeteors(deltaSeconds, timestamp);
+        if (player.health <= 0) player.gameOver = true;
+      }
+      drawScene(timestamp);
+      requestAnimationFrame(gameLoop);
+    }
+
+    canvas.addEventListener('pointermove', event => {
+      if (!player.gameOver) pointerTarget = { x: event.clientX, y: event.clientY };
+    });
+
+    function startAiming(event) {
+      if (event.button !== 0 || player.gameOver) return;
+      isAiming = true;
+      pointerTarget = { x: event.clientX, y: event.clientY };
+      canvas.setPointerCapture(event.pointerId);
+    }
+
+    function finishAiming(event) {
+      if (event.button !== 0 || !isAiming) return;
+      isAiming = false;
+      if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+      if (player.gameOver) return;
+      pointerTarget = { x: event.clientX, y: event.clientY };
+      if (player.energy >= 50) {
+        player.x = pointerTarget.x;
+        player.y = pointerTarget.y;
+        player.energy -= 50;
+        player.trail = [];
+      } else {
+        pointerTarget = { x: player.x, y: player.y };
+      }
+    }
+
+    function cancelAiming(event) {
+      if (!isAiming) return;
+      isAiming = false;
+      pointerTarget = { x: player.x, y: player.y };
+      if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+    }
+
+    canvas.addEventListener('pointerdown', startAiming);
+    canvas.addEventListener('pointerup', finishAiming);
+    canvas.addEventListener('pointercancel', cancelAiming);
+
+    canvas.addEventListener('click', () => {
+      if (player.gameOver) resetGame();
+    });
+
+    resizeCanvas();
+    resetGame();
+    window.addEventListener('resize', resizeCanvas);
+    requestAnimationFrame(gameLoop);
+  </script>
+</body>
+</html>

@@ -1,0 +1,631 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>鼠标飞船</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #071122; font-family: "PingFang SC", "Microsoft YaHei", sans-serif; }
+    canvas { display: block; width: 100%; height: 100%; cursor: none; }
+    [hidden] { display: none !important; }
+    .overlay { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; padding: 20px; background: rgba(2, 8, 20, 0.66); backdrop-filter: blur(8px); }
+    .panel { width: min(420px, 100%); padding: 30px; overflow: hidden; color: #edf7ff; text-align: center; border: 1px solid rgba(103, 255, 171, 0.42); border-radius: 18px; background: linear-gradient(145deg, rgba(14, 39, 72, 0.96), rgba(6, 17, 35, 0.94)); box-shadow: 0 24px 80px rgba(0, 0, 0, 0.46), inset 0 1px rgba(255, 255, 255, 0.06); }
+    .panel::before { content: "SURVIVAL LOG"; display: block; margin: -8px 0 18px; color: #67ffab; font: 700 11px/1 ui-monospace, monospace; letter-spacing: 0.24em; }
+    .panel h1, .panel h2 { margin: 0 0 8px; font-family: "Arial Rounded MT Bold", "PingFang SC", sans-serif; font-size: 34px; letter-spacing: 0.04em; }
+    .panel-copy { margin: 0 0 22px; color: #9cb9d3; font-size: 14px; }
+    .name-input { width: 100%; height: 48px; padding: 0 15px; color: #edf7ff; font: 600 16px/1 inherit; outline: none; border: 1px solid rgba(156, 185, 211, 0.35); border-radius: 10px; background: rgba(2, 11, 25, 0.62); }
+    .name-input:focus { border-color: #67ffab; box-shadow: 0 0 0 3px rgba(103, 255, 171, 0.12); }
+    .error { min-height: 20px; margin: 7px 0 4px; color: #ff93a1; font-size: 13px; }
+    .action-button { width: 100%; height: 46px; color: #06172a; font: 800 15px/1 inherit; cursor: pointer; border: 0; border-radius: 10px; background: linear-gradient(90deg, #67ffab, #67e8ff); box-shadow: 0 8px 30px rgba(80, 236, 180, 0.2); }
+    .action-button:hover { filter: brightness(1.08); }
+    .action-button:focus-visible { outline: 3px solid #edf7ff; outline-offset: 3px; }
+    .final-score { margin: 6px 0 20px; color: #67e8ff; font-size: 20px; font-weight: 700; }
+    .ranking-title { margin: 0 0 8px; color: #9cb9d3; font: 700 11px/1 ui-monospace, monospace; letter-spacing: 0.18em; text-align: left; }
+    .leaderboard { margin: 0 0 22px; padding: 0; list-style: none; counter-reset: rank; }
+    .leaderboard li { counter-increment: rank; display: flex; justify-content: space-between; gap: 16px; padding: 11px 4px; border-bottom: 1px solid rgba(156, 185, 211, 0.14); }
+    .leaderboard li::before { content: "0" counter(rank); color: #67ffab; font: 700 12px/1.7 ui-monospace, monospace; }
+    .leaderboard .score { margin-left: auto; color: #67e8ff; font-family: ui-monospace, monospace; }
+    @media (prefers-reduced-motion: reduce) { .action-button { transition: none; } }
+  </style>
+</head>
+<body>
+  <canvas id="gameCanvas" aria-label="鼠标飞船躲陨石游戏"></canvas>
+  <div id="overlay" class="overlay">
+    <section id="registrationPanel" class="panel">
+      <h1>鼠标飞船</h1>
+      <p class="panel-copy">登记呼号，开始本次生存记录</p>
+      <input id="playerName" class="name-input" maxlength="12" placeholder="输入玩家名字" autocomplete="off">
+      <p id="nameError" class="error" aria-live="polite"></p>
+      <button id="startButton" class="action-button">开始游戏</button>
+    </section>
+    <section id="gameOverPanel" class="panel" hidden>
+      <h2>游戏结束</h2>
+      <p id="finalScore" class="final-score"></p>
+      <p class="ranking-title">LOCAL TOP 3</p>
+      <ol id="leaderboard" class="leaderboard"></ol>
+      <button id="againButton" class="action-button">登记下一局</button>
+    </section>
+  </div>
+  <script>
+    const canvas = document.querySelector('#gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const overlay = document.querySelector('#overlay');
+    const registrationPanel = document.querySelector('#registrationPanel');
+    const gameOverPanel = document.querySelector('#gameOverPanel');
+    const playerNameInput = document.querySelector('#playerName');
+    const nameError = document.querySelector('#nameError');
+    const startButton = document.querySelector('#startButton');
+    const againButton = document.querySelector('#againButton');
+    const finalScore = document.querySelector('#finalScore');
+    const leaderboard = document.querySelector('#leaderboard');
+    const TOP3_KEY = 'meteorMouseTop3';
+    const LAST_PLAYER_KEY = 'meteorMouseLastPlayer';
+    const METEOR_TYPES = [
+      { name: '小型', radius: 14, damage: 10, speed: 180, color: '#e89652' },
+      { name: '中型', radius: 24, damage: 20, speed: 125, color: '#dc7047' },
+      { name: '大型', radius: 36, damage: 30, speed: 85, color: '#bf4d42' }
+    ];
+
+    let player;
+    let meteors;
+    let experience;
+    let collectedInWave;
+    let meteorTarget;
+    let pointerTarget;
+    let isAiming = false;
+    let gamePhase = 'registration';
+    let currentPlayerName = '';
+    let particles = [];
+    let rings = [];
+    let floatingTexts = [];
+    let screenFlash = 0;
+    let audioContext;
+    let lastFrame = 0;
+
+    function resizeCanvas() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    }
+
+    function randomPoint(margin) {
+      return {
+        x: margin + Math.random() * Math.max(1, canvas.width - margin * 2),
+        y: margin + Math.random() * Math.max(1, canvas.height - margin * 2)
+      };
+    }
+
+    function getDifficultyLevel() {
+      return Math.floor(player.score / 1000);
+    }
+
+    function getMeteorTarget() {
+      return Math.min(80, 3 + getDifficultyLevel() * 5);
+    }
+
+    function spawnMeteor() {
+      const type = METEOR_TYPES[Math.floor(Math.random() * METEOR_TYPES.length)];
+      const edge = Math.floor(Math.random() * 4);
+      let x;
+      let y;
+      if (edge === 0) { x = Math.random() * canvas.width; y = -type.radius; }
+      if (edge === 1) { x = canvas.width + type.radius; y = Math.random() * canvas.height; }
+      if (edge === 2) { x = Math.random() * canvas.width; y = canvas.height + type.radius; }
+      if (edge === 3) { x = -type.radius; y = Math.random() * canvas.height; }
+      const target = randomPoint(80);
+      const distance = Math.hypot(target.x - x, target.y - y) || 1;
+      const speed = type.speed * (1 + getDifficultyLevel() * 0.2);
+      return {
+        ...type,
+        x,
+        y,
+        vx: (target.x - x) / distance * speed,
+        vy: (target.y - y) / distance * speed,
+        spin: Math.random() * Math.PI * 2,
+        spinSpeed: (Math.random() - 0.5) * 4
+      };
+    }
+
+    function spawnExperienceWave() {
+      experience = Array.from({ length: 5 }, () => {
+        let point = randomPoint(55);
+        while (Math.hypot(point.x - player.x, point.y - player.y) < 100) point = randomPoint(55);
+        return { ...point, radius: 11, pulse: Math.random() * Math.PI * 2 };
+      });
+    }
+
+    function resetGame() {
+      player = {
+        x: canvas.width / 2,
+        y: canvas.height / 2,
+        radius: 18,
+        health: 100,
+        energy: 100,
+        score: 0,
+        trail: [],
+        invulnerableUntil: 0,
+        gameOver: false
+      };
+      isAiming = false;
+      pointerTarget = { x: player.x, y: player.y };
+      collectedInWave = 0;
+      meteorTarget = getMeteorTarget();
+      meteors = Array.from({ length: meteorTarget }, spawnMeteor);
+      spawnExperienceWave();
+      particles = [];
+      rings = [];
+      floatingTexts = [];
+      screenFlash = 0;
+    }
+
+    function loadLeaderboard() {
+      try {
+        const value = JSON.parse(localStorage.getItem(TOP3_KEY) || '[]');
+        return Array.isArray(value)
+          ? value.filter(entry => entry && typeof entry.name === 'string' && Number.isFinite(entry.score))
+          : [];
+      } catch {
+        return [];
+      }
+    }
+
+    function saveScore(name, score) {
+      const scores = loadLeaderboard();
+      const previous = scores.find(entry => entry.name === name);
+      if (previous) previous.score = Math.max(previous.score, score);
+      else scores.push({ name, score });
+      const top = scores.sort((a, b) => b.score - a.score).slice(0, 3);
+      try { localStorage.setItem(TOP3_KEY, JSON.stringify(top)); } catch {}
+      return top;
+    }
+
+    function renderLeaderboard(scores) {
+      leaderboard.replaceChildren(...scores.map(entry => {
+        const item = document.createElement('li');
+        const name = document.createElement('span');
+        const score = document.createElement('span');
+        name.textContent = entry.name;
+        score.className = 'score';
+        score.textContent = `${entry.score} 分`;
+        item.append(name, score);
+        return item;
+      }));
+    }
+
+    function showRegistration() {
+      gamePhase = 'registration';
+      registrationPanel.hidden = false;
+      gameOverPanel.hidden = true;
+      overlay.hidden = false;
+      nameError.textContent = '';
+      try { playerNameInput.value = localStorage.getItem(LAST_PLAYER_KEY) || currentPlayerName; } catch {
+        playerNameInput.value = currentPlayerName;
+      }
+      playerNameInput.focus();
+    }
+
+    function startGame() {
+      const name = playerNameInput.value.trim();
+      if (!name) {
+        nameError.textContent = '请输入玩家名字';
+        playerNameInput.focus();
+        return;
+      }
+      currentPlayerName = name.slice(0, 12);
+      nameError.textContent = '';
+      try { localStorage.setItem(LAST_PLAYER_KEY, currentPlayerName); } catch {}
+      resetGame();
+      gamePhase = 'playing';
+      overlay.hidden = true;
+      resumeAudio();
+    }
+
+    function endGame() {
+      if (gamePhase !== 'playing') return;
+      gamePhase = 'gameover';
+      player.gameOver = true;
+      spawnRing(player.x, player.y, '#ff5d72');
+      spawnBurst(player.x, player.y, '#ff5d72', 28);
+      playEventSound('gameover');
+      const top = saveScore(currentPlayerName, player.score);
+      finalScore.textContent = `${currentPlayerName}：${player.score} 分`;
+      renderLeaderboard(top);
+      registrationPanel.hidden = true;
+      gameOverPanel.hidden = false;
+      overlay.hidden = false;
+    }
+
+    function circlesOverlap(a, b) {
+      return Math.hypot(a.x - b.x, a.y - b.y) < a.radius + b.radius;
+    }
+
+    function updatePlayer(deltaSeconds) {
+      if (!isAiming && pointerTarget && (player.x !== pointerTarget.x || player.y !== pointerTarget.y)) {
+        player.x = pointerTarget.x;
+        player.y = pointerTarget.y;
+        player.trail.push({ x: player.x, y: player.y, life: 1 });
+        player.trail = player.trail.slice(-18);
+      }
+      player.energy = Math.min(100, player.energy + deltaSeconds * 5);
+      player.trail.forEach(point => { point.life -= deltaSeconds * 2.2; });
+      player.trail = player.trail.filter(point => point.life > 0);
+    }
+
+    function updateMeteors(deltaSeconds, now) {
+      meteorTarget = getMeteorTarget();
+      meteors = meteors.filter(meteor => {
+        meteor.x += meteor.vx * deltaSeconds;
+        meteor.y += meteor.vy * deltaSeconds;
+        meteor.spin += meteor.spinSpeed * deltaSeconds;
+        if (now >= player.invulnerableUntil && circlesOverlap(player, meteor)) {
+          player.health -= meteor.damage;
+          player.invulnerableUntil = now + 500;
+          spawnBurst(player.x, player.y, '#ff5d72', 18);
+          spawnText(player.x + 14, player.y - 14, `-${meteor.damage}耐久`, '#ff9aa8');
+          screenFlash = 0.22;
+          playEventSound('hit');
+          return false;
+        }
+        return meteor.x > -meteor.radius * 2 && meteor.x < canvas.width + meteor.radius * 2 &&
+          meteor.y > -meteor.radius * 2 && meteor.y < canvas.height + meteor.radius * 2;
+      });
+      while (meteors.length < meteorTarget) meteors.push(spawnMeteor());
+    }
+
+    function updateExperience() {
+      experience = experience.filter(point => {
+        if (!circlesOverlap(player, point)) return true;
+        player.health = Math.min(100, player.health + 5);
+        player.score += 100;
+        collectedInWave += 1;
+        spawnBurst(point.x, point.y, '#67ffab', 14);
+        spawnRing(point.x, point.y, '#67ffab');
+        spawnText(point.x + 12, point.y - 12, '+100 / +5耐久', '#baffd5');
+        playEventSound('experience');
+        return false;
+      });
+      if (collectedInWave === 5) {
+        collectedInWave = 0;
+        spawnExperienceWave();
+      }
+    }
+
+    function spawnBurst(x, y, color, count) {
+      for (let i = 0; i < count; i += 1) {
+        const angle = Math.random() * Math.PI * 2;
+        const speed = 45 + Math.random() * 110;
+        particles.push({
+          x,
+          y,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed,
+          life: 0.7,
+          color,
+          size: 2 + Math.random() * 3
+        });
+      }
+      particles = particles.slice(-180);
+    }
+
+    function spawnRing(x, y, color) {
+      rings.push({ x, y, radius: 8, life: 0.55, color });
+      rings = rings.slice(-20);
+    }
+
+    function spawnText(x, y, text, color) {
+      floatingTexts.push({ x, y, text, color, life: 0.9 });
+      floatingTexts = floatingTexts.slice(-12);
+    }
+
+    function updateEffects(deltaSeconds) {
+      particles.forEach(particle => {
+        particle.x += particle.vx * deltaSeconds;
+        particle.y += particle.vy * deltaSeconds;
+        particle.life -= deltaSeconds;
+      });
+      rings.forEach(ring => {
+        ring.radius += 90 * deltaSeconds;
+        ring.life -= deltaSeconds;
+      });
+      floatingTexts.forEach(text => {
+        text.y -= 32 * deltaSeconds;
+        text.life -= deltaSeconds;
+      });
+      particles = particles.filter(particle => particle.life > 0);
+      rings = rings.filter(ring => ring.life > 0);
+      floatingTexts = floatingTexts.filter(text => text.life > 0);
+      screenFlash = Math.max(0, screenFlash - deltaSeconds * 2.5);
+    }
+
+    function drawEffects() {
+      particles.forEach(particle => {
+        ctx.globalAlpha = Math.min(1, particle.life * 2);
+        ctx.fillStyle = particle.color;
+        ctx.beginPath();
+        ctx.arc(particle.x, particle.y, particle.size, 0, Math.PI * 2);
+        ctx.fill();
+      });
+      rings.forEach(ring => {
+        ctx.globalAlpha = Math.min(1, ring.life * 2);
+        ctx.strokeStyle = ring.color;
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.arc(ring.x, ring.y, ring.radius, 0, Math.PI * 2);
+        ctx.stroke();
+      });
+      floatingTexts.forEach(text => {
+        ctx.globalAlpha = Math.min(1, text.life * 2);
+        ctx.fillStyle = text.color;
+        ctx.font = 'bold 16px system-ui, sans-serif';
+        ctx.fillText(text.text, text.x, text.y);
+      });
+      ctx.globalAlpha = 1;
+      if (screenFlash > 0) {
+        ctx.fillStyle = `rgba(255, 50, 70, ${screenFlash})`;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      }
+    }
+
+    function resumeAudio() {
+      const AudioEngine = window.AudioContext || window.webkitAudioContext;
+      if (!AudioEngine) return;
+      try {
+        audioContext ||= new AudioEngine();
+        if (audioContext.state === 'suspended') audioContext.resume();
+      } catch {}
+    }
+
+    function playTone(startFrequency, endFrequency, duration, type, volume) {
+      if (!audioContext || audioContext.state === 'closed') return;
+      const oscillator = audioContext.createOscillator();
+      const gain = audioContext.createGain();
+      const now = audioContext.currentTime;
+      oscillator.type = type;
+      oscillator.frequency.setValueAtTime(startFrequency, now);
+      oscillator.frequency.exponentialRampToValueAtTime(endFrequency, now + duration);
+      gain.gain.setValueAtTime(volume, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + duration);
+      oscillator.connect(gain).connect(audioContext.destination);
+      oscillator.start(now);
+      oscillator.stop(now + duration);
+    }
+
+    function playEventSound(kind) {
+      if (kind === 'experience') playTone(520, 880, 0.16, 'sine', 0.08);
+      if (kind === 'hit') playTone(150, 60, 0.2, 'sawtooth', 0.11);
+      if (kind === 'teleport') playTone(260, 900, 0.22, 'sine', 0.09);
+      if (kind === 'gameover') playTone(420, 80, 0.7, 'triangle', 0.1);
+    }
+
+    function drawBackground(now) {
+      const gradient = ctx.createRadialGradient(canvas.width * 0.5, canvas.height * 0.45, 0, canvas.width * 0.5, canvas.height * 0.45, Math.max(canvas.width, canvas.height));
+      gradient.addColorStop(0, '#122b51');
+      gradient.addColorStop(1, '#050a15');
+      ctx.fillStyle = gradient;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = 'rgba(185, 225, 255, 0.55)';
+      for (let i = 0; i < 80; i += 1) {
+        const x = (i * 149) % canvas.width;
+        const y = (i * 83) % canvas.height;
+        const size = i % 7 === 0 ? 2 : 1;
+        ctx.globalAlpha = 0.25 + ((Math.sin(now / 700 + i) + 1) * 0.2);
+        ctx.fillRect(x, y, size, size);
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    function drawExperience(now) {
+      experience.forEach(point => {
+        const glow = 16 + Math.sin(now / 180 + point.pulse) * 4;
+        const gradient = ctx.createRadialGradient(point.x, point.y, 1, point.x, point.y, glow);
+        gradient.addColorStop(0, 'rgba(172, 255, 146, 1)');
+        gradient.addColorStop(0.35, 'rgba(80, 236, 140, 0.8)');
+        gradient.addColorStop(1, 'rgba(80, 236, 140, 0)');
+        ctx.fillStyle = gradient;
+        ctx.beginPath();
+        ctx.arc(point.x, point.y, glow, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#d7ffc6';
+        ctx.beginPath();
+        ctx.arc(point.x, point.y, point.radius * 0.55, 0, Math.PI * 2);
+        ctx.fill();
+      });
+    }
+
+    function drawMeteor(meteor) {
+      ctx.save();
+      ctx.translate(meteor.x, meteor.y);
+      ctx.rotate(meteor.spin);
+      ctx.fillStyle = meteor.color;
+      ctx.beginPath();
+      for (let i = 0; i < 9; i += 1) {
+        const angle = i / 9 * Math.PI * 2;
+        const radius = meteor.radius * (0.78 + (i % 2) * 0.2);
+        const x = Math.cos(angle) * radius;
+        const y = Math.sin(angle) * radius;
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = 'rgba(65, 25, 30, 0.5)';
+      ctx.beginPath();
+      ctx.arc(-meteor.radius * 0.22, -meteor.radius * 0.12, meteor.radius * 0.18, 0, Math.PI * 2);
+      ctx.arc(meteor.radius * 0.22, meteor.radius * 0.18, meteor.radius * 0.12, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    function drawTrail() {
+      player.trail.forEach(point => {
+        ctx.fillStyle = `rgba(59, 255, 142, ${point.life * 0.22})`;
+        ctx.beginPath();
+        ctx.arc(point.x, point.y, 5 + point.life * 9, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = `rgba(198, 255, 220, ${point.life * 0.62})`;
+        ctx.beginPath();
+        ctx.arc(point.x, point.y, 2 + point.life * 4, 0, Math.PI * 2);
+        ctx.fill();
+      });
+    }
+
+    function drawMouse(now) {
+      const blinking = now < player.invulnerableUntil && Math.floor(now / 70) % 2 === 0;
+      ctx.save();
+      ctx.translate(player.x, player.y);
+      ctx.globalAlpha = blinking ? 0.42 : 1;
+      ctx.fillStyle = '#67ffab';
+      ctx.beginPath();
+      ctx.moveTo(-18, -7);
+      ctx.lineTo(-35, 0);
+      ctx.lineTo(-18, 7);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = '#35546D';
+      ctx.fillRect(-23, -8, 8, 16);
+      ctx.fillStyle = '#dce8f2';
+      ctx.strokeStyle = '#35546D';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.ellipse(0, 2, 19, 14, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = '#4D7FA8';
+      ctx.beginPath();
+      ctx.arc(-10, -10, 6, 0, Math.PI * 2);
+      ctx.arc(2, -11, 6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#67e8ff';
+      ctx.beginPath();
+      ctx.ellipse(9, -2, 7, 5, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#17334b';
+      ctx.beginPath();
+      ctx.arc(14, -1, 2, 0, Math.PI * 2);
+      ctx.fill();
+      if (now < player.invulnerableUntil) {
+        ctx.strokeStyle = 'rgba(103, 232, 255, 0.72)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.ellipse(0, 1, 29, 23, 0, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    function drawAimReticle() {
+      if (!isAiming || !pointerTarget) return;
+      ctx.save();
+      ctx.translate(pointerTarget.x, pointerTarget.y);
+      ctx.strokeStyle = '#67ffab';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(0, 0, 16, 0, Math.PI * 2);
+      ctx.moveTo(-24, 0); ctx.lineTo(24, 0);
+      ctx.moveTo(0, -24); ctx.lineTo(0, 24);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function drawBar(x, y, width, label, value, color) {
+      ctx.fillStyle = 'rgba(6, 14, 30, 0.38)';
+      ctx.fillRect(x, y, width, 26);
+      ctx.fillStyle = color;
+      ctx.fillRect(x + 3, y + 3, (width - 6) * value / 100, 20);
+      ctx.fillStyle = '#edf7ff';
+      ctx.font = 'bold 13px system-ui, sans-serif';
+      ctx.fillText(`${label} ${Math.ceil(value)}/100`, x + 9, y + 18);
+    }
+
+    function drawHud() {
+      drawBar(22, 22, 220, '舰体耐久', player.health, 'rgba(237, 94, 111, 0.68)');
+      drawBar(22, 56, 220, '跃迁能量', player.energy, 'rgba(80, 197, 247, 0.68)');
+      ctx.fillStyle = '#edf7ff';
+      ctx.font = 'bold 18px system-ui, sans-serif';
+      ctx.fillText(`分数 ${player.score}`, 22, 105);
+      ctx.font = '14px system-ui, sans-serif';
+      ctx.fillStyle = '#a9c4df';
+      ctx.fillText(`能量晶体 ${collectedInWave}/5  ·  难度 ${getDifficultyLevel()}  ·  陨石 ${meteorTarget}`, 22, 130);
+      ctx.textAlign = 'right';
+      ctx.fillText('移动鼠标驾驶  ·  按住左键瞄准，松开空间跃迁（消耗 50 跃迁能量）', canvas.width - 22, 34);
+      ctx.textAlign = 'left';
+    }
+
+    function drawScene(now) {
+      drawBackground(now);
+      drawExperience(now);
+      meteors.forEach(drawMeteor);
+      drawTrail();
+      drawMouse(now);
+      drawAimReticle();
+      drawEffects();
+      drawHud();
+    }
+
+    function gameLoop(timestamp) {
+      const deltaSeconds = Math.min((timestamp - (lastFrame || timestamp)) / 1000, 0.05);
+      lastFrame = timestamp;
+      if (gamePhase === 'playing') {
+        updatePlayer(deltaSeconds);
+        updateExperience();
+        updateMeteors(deltaSeconds, timestamp);
+        if (player.health <= 0) endGame();
+      }
+      updateEffects(deltaSeconds);
+      drawScene(timestamp);
+      requestAnimationFrame(gameLoop);
+    }
+
+    canvas.addEventListener('pointermove', event => {
+      if (gamePhase === 'playing') pointerTarget = { x: event.clientX, y: event.clientY };
+    });
+
+    function startAiming(event) {
+      if (event.button !== 0 || gamePhase !== 'playing') return;
+      isAiming = true;
+      pointerTarget = { x: event.clientX, y: event.clientY };
+      canvas.setPointerCapture(event.pointerId);
+    }
+
+    function finishAiming(event) {
+      if (event.button !== 0 || !isAiming) return;
+      isAiming = false;
+      if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+      if (player.gameOver) return;
+      pointerTarget = { x: event.clientX, y: event.clientY };
+      if (player.energy >= 50) {
+        const originX = player.x;
+        const originY = player.y;
+        player.x = pointerTarget.x;
+        player.y = pointerTarget.y;
+        player.energy -= 50;
+        player.trail = [];
+        spawnRing(originX, originY, '#67ffab');
+        spawnRing(player.x, player.y, '#67e8ff');
+        spawnBurst(player.x, player.y, '#67e8ff', 18);
+        playEventSound('teleport');
+      } else {
+        pointerTarget = { x: player.x, y: player.y };
+      }
+    }
+
+    function cancelAiming(event) {
+      if (!isAiming) return;
+      isAiming = false;
+      pointerTarget = { x: player.x, y: player.y };
+      if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+    }
+
+    canvas.addEventListener('pointerdown', startAiming);
+    canvas.addEventListener('pointerup', finishAiming);
+    canvas.addEventListener('pointercancel', cancelAiming);
+    startButton.addEventListener('click', startGame);
+    againButton.addEventListener('click', showRegistration);
+
+    resizeCanvas();
+    resetGame();
+    showRegistration();
+    window.addEventListener('resize', resizeCanvas);
+    requestAnimationFrame(gameLoop);
+  </script>
+</body>
+</html>
